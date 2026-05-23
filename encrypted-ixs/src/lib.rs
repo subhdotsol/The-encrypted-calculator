@@ -22,4 +22,11 @@ mod circuits {
         let diff = input.v1 as u16 - input.v2 as u16;
         input_ctxt.owner.from_arcis(diff) // confidential sum into ciphertext format to store on chain shared secret with client and MXE
     }
+
+    #[instruction]
+    pub fn multiply(input_ctxt: Enc<Shared, InputValues>) -> Enc<Shared, u16> {
+        let input = input_ctxt.to_arcis();
+        let product = input.v1 as u16 * input.v2 as u16;
+        input_ctxt.owner.from_arcis(product)
+    }
 }

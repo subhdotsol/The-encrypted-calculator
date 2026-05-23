@@ -314,6 +314,160 @@ describe("HelloWorld", () => {
     console.log("\n========== TEST PASSED ==========");
   });
 
+  it("Multiply works!", async () => {
+    // Step 1: Load the payer keypair from the local Solana wallet.
+    // This is the account that will sign and pay for all transactions.
+    const owner = readKpJson(`${os.homedir()}/.config/solana/id.json`);
+
+    // Step 2: Initialize the computation definition for "multiply".
+    // This registers the circuit on-chain so MXE knows how to execute it.
+    console.log("Initializing multiply computation definition");
+    const initMulSig = await initMultiplyCompDef(program, owner);
+    console.log(
+      "Multiply computation definition initialized with signature",
+      initMulSig
+    );
+
+    // Step 3: Fetch the MXE's x25519 public key.
+    // This is needed to establish a shared secret for encrypting inputs
+    // and decrypting outputs. Retries because MXE may not be ready immediately.
+    const mxePublicKey = await getMXEPublicKeyWithRetry(
+      provider as anchor.AnchorProvider,
+      program.programId
+    );
+
+    console.log("MXE x25519 pubkey is", mxePublicKey);
+
+    // Step 4: Generate an ephemeral x25519 keypair for this computation.
+    // The private key stays client-side; the public key is sent on-chain
+    // so MXE can derive the same shared secret for encrypting the result.
+    const privateKey = x25519.utils.randomSecretKey();
+    const publicKey = x25519.getPublicKey(privateKey);
+
+    // Step 5: Derive the shared secret and create a cipher instance.
+    // Both client and MXE derive the same secret via ECDH (x25519),
+    // then use RescueCipher for symmetric encryption/decryption.
+    const sharedSecret = x25519.getSharedSecret(privateKey, mxePublicKey);
+    const cipher = new RescueCipher(sharedSecret);
+
+    // Step 6: Define the plaintext inputs to multiply.
+    const val1 = BigInt(7);
+    const val2 = BigInt(8);
+
+    console.log("\n========== PLAINTEXT INPUTS ==========");
+    console.log("a =", val1.toString());
+    console.log("b =", val2.toString());
+
+    const plaintext = [val1, val2];
+
+    console.log("\nPlaintext array:");
+    console.log(plaintext.map((v) => v.toString()));
+
+    // Step 7: Generate a random 16-byte nonce for encryption.
+    // The nonce ensures each encryption produces a unique ciphertext,
+    // even for the same plaintext and key.
+    const nonce = randomBytes(16);
+
+    console.log("\n========== NONCE ==========");
+    console.log("nonce (hex) =", Buffer.from(nonce).toString("hex"));
+
+    // Step 8: Encrypt the plaintext values using the shared cipher.
+    // Each value becomes a 32-byte ciphertext that only MXE can process.
+    const ciphertext = cipher.encrypt(plaintext, nonce);
+
+    console.log("\n========== ENCRYPTED VALUES ==========");
+    console.log("enc(a) raw bytes =", ciphertext[0]);
+    console.log("enc(a) hex =", Buffer.from(ciphertext[0]).toString("hex"));
+    console.log("enc(b) raw bytes =", ciphertext[1]);
+    console.log("enc(b) hex =", Buffer.from(ciphertext[1]).toString("hex"));
+
+    console.log("\n========== ENCRYPTION SUMMARY ==========");
+    console.log(`${val1.toString()} -> enc(a)`);
+    console.log(`${val2.toString()} -> enc(b)`);
+
+    // Step 9: Set up an event listener BEFORE submitting the transaction.
+    // The callback instruction emits a DiffEvent with the encrypted result.
+    // We await this promise after finalization to capture the output.
+    const mulEventPromise = awaitEvent("multiplyEvent");
+
+    // Step 10: Generate a random computation offset.
+    // This is a unique identifier for this specific computation instance,
+    // used to derive the on-chain computation account PDA.
+    const computationOffset = new anchor.BN(randomBytes(8), "hex");
+
+    // Step 11: Submit the multiply instruction on-chain.
+    // This queues the encrypted computation for MXE to process.
+    // We pass: computation offset, two encrypted inputs, our public key, and the nonce.
+    const queueSig = await program.methods
+      .multiply(
+        computationOffset,
+        Array.from(ciphertext[0]),
+        Array.from(ciphertext[1]),
+        Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString())
+      )
+      .accountsPartial({
+        // Derive all required PDA accounts for the computation:
+        computationAccount: getComputationAccAddress(
+          arciumEnv.arciumClusterOffset,
+          computationOffset
+        ),
+        clusterAccount,
+        mxeAccount: getMXEAccAddress(program.programId),
+        mempoolAccount: getMempoolAccAddress(arciumEnv.arciumClusterOffset),
+        executingPool: getExecutingPoolAccAddress(
+          arciumEnv.arciumClusterOffset
+        ),
+        compDefAccount: getCompDefAccAddress(
+          program.programId,
+          Buffer.from(getCompDefAccOffset("multiply")).readUInt32LE()
+        ),
+      })
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    console.log("Queue sig is ", queueSig);
+
+    // Step 12: Wait for MXE to pick up, execute, and finalize the computation.
+    // This polls until the computation result is written on-chain.
+    const finalizeSig = await awaitComputationFinalization(
+      provider as anchor.AnchorProvider,
+      computationOffset,
+      program.programId,
+      "confirmed"
+    );
+    console.log("Finalize sig is ", finalizeSig);
+
+    // Step 13: Await the emitted event containing the encrypted result.
+    const mulEvent = await mulEventPromise;
+
+    console.log("\n========== EVENT RECEIVED ==========");
+    console.log("encrypted result raw =", mulEvent.product);
+    console.log(
+      "encrypted result hex =",
+      Buffer.from(mulEvent.product).toString("hex")
+    );
+    console.log(
+      "result nonce hex =",
+      Buffer.from(mulEvent.nonce).toString("hex")
+    );
+
+    // Step 14: Decrypt the result using the same shared cipher.
+    // MXE encrypted the output with our shared secret, so we can decrypt it.
+    console.log("\n========== DECRYPTING RESULT ==========");
+    const decrypted = cipher.decrypt([mulEvent.product], mulEvent.nonce)[0];
+    console.log("final decrypted result =", decrypted.toString());
+
+    // Step 15: Assert the decrypted result matches the expected product.
+    console.log("\n========== EXPECTED ==========");
+    console.log(
+      `${val1.toString()} * ${val2.toString()} = ${(val1 * val2).toString()}`
+    );
+
+    expect(decrypted).to.equal(val1 * val2);
+
+    console.log("\n========== TEST PASSED ==========");
+  });
+
+  // --- Helper: Initialize the "add_together" computation definition ---
   async function initAddTogetherCompDef(
     program: Program<HelloWorld>,
     owner: anchor.web3.Keypair
@@ -410,6 +564,67 @@ describe("HelloWorld", () => {
     await uploadCircuit(
       provider as anchor.AnchorProvider,
       "subtract",
+      program.programId,
+      rawCircuit,
+      true,
+      500,
+      {
+        skipPreflight: true,
+        preflightCommitment: "confirmed",
+        commitment: "confirmed",
+      }
+    );
+
+    return sig;
+  }
+
+  // --- Helper: Initialize the "multiply" computation definition ---
+  // This follows the same pattern as initAddTogetherCompDef / initSubtractCompDef:
+  //   1. Derive the PDA for the computation definition account
+  //   2. Fetch the MXE account to get the lookup table address
+  //   3. Call the init instruction to register the comp def on-chain
+  //   4. Upload the compiled circuit binary so MXE can execute it
+  async function initMultiplyCompDef(
+    program: Program<HelloWorld>,
+    owner: anchor.web3.Keypair
+  ): Promise<string> {
+    const baseSeedCompDefAcc = getArciumAccountBaseSeed(
+      "ComputationDefinitionAccount"
+    );
+    const offset = getCompDefAccOffset("multiply");
+
+    const compDefPDA = PublicKey.findProgramAddressSync(
+      [baseSeedCompDefAcc, program.programId.toBuffer(), offset],
+      getArciumProgramId()
+    )[0];
+
+    console.log("Comp def pda is ", compDefPDA);
+
+    const mxeAccount = getMXEAccAddress(program.programId);
+    const mxeAcc = await arciumProgram.account.mxeAccount.fetch(mxeAccount);
+    const lutAddress = getLookupTableAddress(
+      program.programId,
+      mxeAcc.lutOffsetSlot
+    );
+
+    const sig = await program.methods
+      .initMultiplyCompDef()
+      .accounts({
+        compDefAccount: compDefPDA,
+        payer: owner.publicKey,
+        mxeAccount,
+        addressLookupTable: lutAddress,
+      })
+      .signers([owner])
+      .rpc({
+        commitment: "confirmed",
+      });
+    console.log("Init multiply computation definition transaction", sig);
+
+    const rawCircuit = fs.readFileSync("build/multiply.arcis");
+    await uploadCircuit(
+      provider as anchor.AnchorProvider,
+      "multiply",
       program.programId,
       rawCircuit,
       true,
