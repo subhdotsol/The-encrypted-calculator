@@ -188,6 +188,132 @@ describe("HelloWorld", () => {
     console.log("\n========== TEST PASSED ==========");
   });
 
+  it("Subtract works!", async () => {
+    const owner = readKpJson(`${os.homedir()}/.config/solana/id.json`);
+
+    console.log("Initializing subtract computation definition");
+    const initSubSig = await initSubtractCompDef(program, owner);
+    console.log(
+      "Subtract computation definition initialized with signature",
+      initSubSig
+    );
+
+    const mxePublicKey = await getMXEPublicKeyWithRetry(
+      provider as anchor.AnchorProvider,
+      program.programId
+    );
+
+    console.log("MXE x25519 pubkey is", mxePublicKey);
+
+    const privateKey = x25519.utils.randomSecretKey();
+    const publicKey = x25519.getPublicKey(privateKey);
+
+    const sharedSecret = x25519.getSharedSecret(privateKey, mxePublicKey);
+    const cipher = new RescueCipher(sharedSecret);
+
+    const val1 = BigInt(60);
+    const val2 = BigInt(9);
+
+    console.log("\n========== PLAINTEXT INPUTS ==========");
+    console.log("a =", val1.toString());
+    console.log("b =", val2.toString());
+
+    const plaintext = [val1, val2];
+
+    console.log("\nPlaintext array:");
+    console.log(plaintext.map((v) => v.toString()));
+
+    const nonce = randomBytes(16);
+
+    console.log("\n========== NONCE ==========");
+    console.log("nonce (hex) =", Buffer.from(nonce).toString("hex"));
+
+    const ciphertext = cipher.encrypt(plaintext, nonce);
+
+    console.log("\n========== ENCRYPTED VALUES ==========");
+
+    console.log("enc(a) raw bytes =", ciphertext[0]);
+
+    console.log("enc(a) hex =", Buffer.from(ciphertext[0]).toString("hex"));
+
+    console.log("enc(b) raw bytes =", ciphertext[1]);
+
+    console.log("enc(b) hex =", Buffer.from(ciphertext[1]).toString("hex"));
+
+    console.log("\n========== ENCRYPTION SUMMARY ==========");
+    console.log("60 -> enc(a)");
+    console.log("9  -> enc(b)");
+
+    const diffEventPromise = awaitEvent("diffEvent");
+    const computationOffset = new anchor.BN(randomBytes(8), "hex");
+
+    const queueSig = await program.methods
+      .subtract(
+        computationOffset,
+        Array.from(ciphertext[0]),
+        Array.from(ciphertext[1]),
+        Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString())
+      )
+      .accountsPartial({
+        computationAccount: getComputationAccAddress(
+          arciumEnv.arciumClusterOffset,
+          computationOffset
+        ),
+        clusterAccount,
+        mxeAccount: getMXEAccAddress(program.programId),
+        mempoolAccount: getMempoolAccAddress(arciumEnv.arciumClusterOffset),
+        executingPool: getExecutingPoolAccAddress(
+          arciumEnv.arciumClusterOffset
+        ),
+        compDefAccount: getCompDefAccAddress(
+          program.programId,
+          Buffer.from(getCompDefAccOffset("subtract")).readUInt32LE()
+        ),
+      })
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    console.log("Queue sig is ", queueSig);
+
+    const finalizeSig = await awaitComputationFinalization(
+      provider as anchor.AnchorProvider,
+      computationOffset,
+      program.programId,
+      "confirmed"
+    );
+    console.log("Finalize sig is ", finalizeSig);
+
+    const diffEvent = await diffEventPromise;
+
+    console.log("\n========== EVENT RECEIVED ==========");
+
+    console.log("encrypted result raw =", diffEvent.diff);
+
+    console.log(
+      "encrypted result hex =",
+      Buffer.from(diffEvent.diff).toString("hex")
+    );
+
+    console.log(
+      "result nonce hex =",
+      Buffer.from(diffEvent.nonce).toString("hex")
+    );
+
+    console.log("\n========== DECRYPTING RESULT ==========");
+
+    const decrypted = cipher.decrypt([diffEvent.diff], diffEvent.nonce)[0];
+
+    console.log("final decrypted result =", decrypted.toString());
+
+    console.log("\n========== EXPECTED ==========");
+    console.log(
+      `${val1.toString()} - ${val2.toString()} = ${(val1 - val2).toString()}`
+    );
+
+    expect(decrypted).to.equal(val1 - val2);
+
+    console.log("\n========== TEST PASSED ==========");
+  });
+
   async function initAddTogetherCompDef(
     program: Program<HelloWorld>,
     owner: anchor.web3.Keypair
@@ -229,6 +355,61 @@ describe("HelloWorld", () => {
     await uploadCircuit(
       provider as anchor.AnchorProvider,
       "add_together",
+      program.programId,
+      rawCircuit,
+      true,
+      500,
+      {
+        skipPreflight: true,
+        preflightCommitment: "confirmed",
+        commitment: "confirmed",
+      }
+    );
+
+    return sig;
+  }
+
+  async function initSubtractCompDef(
+    program: Program<HelloWorld>,
+    owner: anchor.web3.Keypair
+  ): Promise<string> {
+    const baseSeedCompDefAcc = getArciumAccountBaseSeed(
+      "ComputationDefinitionAccount"
+    );
+    const offset = getCompDefAccOffset("subtract");
+
+    const compDefPDA = PublicKey.findProgramAddressSync(
+      [baseSeedCompDefAcc, program.programId.toBuffer(), offset],
+      getArciumProgramId()
+    )[0];
+
+    console.log("Comp def pda is ", compDefPDA);
+
+    const mxeAccount = getMXEAccAddress(program.programId);
+    const mxeAcc = await arciumProgram.account.mxeAccount.fetch(mxeAccount);
+    const lutAddress = getLookupTableAddress(
+      program.programId,
+      mxeAcc.lutOffsetSlot
+    );
+
+    const sig = await program.methods
+      .initSubtractCompDef()
+      .accounts({
+        compDefAccount: compDefPDA,
+        payer: owner.publicKey,
+        mxeAccount,
+        addressLookupTable: lutAddress,
+      })
+      .signers([owner])
+      .rpc({
+        commitment: "confirmed",
+      });
+    console.log("Init subtract computation definition transaction", sig);
+
+    const rawCircuit = fs.readFileSync("build/subtract.arcis");
+    await uploadCircuit(
+      provider as anchor.AnchorProvider,
+      "subtract",
       program.programId,
       rawCircuit,
       true,
