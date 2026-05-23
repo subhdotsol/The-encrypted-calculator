@@ -18,6 +18,9 @@ arcium test
 | `tests/hello_world.ts` | TypeScript integration tests |
 | `Arcium.toml` | Localnet and cluster configuration |
 
+## Steps to write tests 
+![steps to write tests](./tests.png)
+
 ## Docs
 
 <https://docs.arcium.com/developers>
