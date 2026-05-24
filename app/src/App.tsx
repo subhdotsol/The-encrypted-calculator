@@ -11,6 +11,14 @@ export default function App() {
   const [txSig, setTxSig] = useState<string | null>(null);
 
   const { compute, connected } = useArciumCompute();
+  const [copied, setCopied] = useState(false);
+
+  const copyTxSig = () => {
+    if (!txSig) return;
+    navigator.clipboard.writeText(txSig);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   const calculate = async () => {
     const a = Number(num1);
@@ -153,9 +161,16 @@ export default function App() {
               {loading ? "..." : result !== null ? result : "—"}
             </p>
             {txSig && (
-              <p className="text-xs text-zinc-400 mt-2 truncate" title={txSig}>
-                tx: {txSig}
-              </p>
+              <button
+                onClick={copyTxSig}
+                className="flex items-center gap-1.5 text-xs text-zinc-400 mt-2 hover:text-zinc-600 transition-colors cursor-pointer w-full text-left"
+                title={txSig}
+              >
+                <span className="truncate">tx: {txSig}</span>
+                <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-500">
+                  {copied ? "Copied!" : "Copy"}
+                </span>
+              </button>
             )}
           </div>
         </div>

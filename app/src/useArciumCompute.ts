@@ -38,6 +38,22 @@ const CLUSTER_OFFSET = Number(
   import.meta.env.VITE_ARCIUM_CLUSTER_OFFSET || "456"
 );
 
+// Curve25519 field prime: 2^255 - 19
+const FIELD_PRIME = BigInt(
+  "57896044618658097711785492504343953926634992332820282019728792003956564819949"
+);
+const HALF_PRIME = FIELD_PRIME / 2n;
+
+// For subtraction, the MXE returns results in the prime field.
+// If a - b < 0, the result wraps to p + (a - b). Detect this and
+// convert back to a signed value.
+function toSignedResult(raw: bigint, operation: Operation): string {
+  if (operation === "subtract" && raw > HALF_PRIME) {
+    return (raw - FIELD_PRIME).toString();
+  }
+  return raw.toString();
+}
+
 function getRandomBytes(n: number): Uint8Array {
   const bytes = new Uint8Array(n);
   crypto.getRandomValues(bytes);
@@ -218,10 +234,11 @@ export function useArciumCompute() {
         resultNonce as any
       )[0];
 
-      console.log(`Result: ${decrypted}`);
+      const displayResult = toSignedResult(decrypted, operation);
+      console.log(`Result: ${displayResult}`);
 
       return {
-        result: decrypted.toString(),
+        result: displayResult,
         operation,
         a: a.toString(),
         b: b.toString(),
