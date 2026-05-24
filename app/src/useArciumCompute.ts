@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { AnchorProvider, Program, BN } from "@anchor-lang/core";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, SendTransactionError } from "@solana/web3.js";
 import {
   awaitComputationFinalization,
   getCompDefAccOffset,
@@ -35,7 +35,7 @@ const PROGRAM_ID = new PublicKey(
 );
 
 const CLUSTER_OFFSET = Number(
-  import.meta.env.VITE_ARCIUM_CLUSTER_OFFSET || "0"
+  import.meta.env.VITE_ARCIUM_CLUSTER_OFFSET || "456"
 );
 
 function getRandomBytes(n: number): Uint8Array {
@@ -142,37 +142,53 @@ export function useArciumCompute() {
       );
 
       // Build and send the transaction
-      const methodFn =
+      const methodName =
         operation === "add"
-          ? program.methods.addTogether
+          ? "addTogether"
           : operation === "subtract"
-            ? program.methods.subtract
-            : program.methods.multiply;
+            ? "subtract"
+            : "multiply";
 
-      const queueSig = await methodFn
-        .call(
-          program.methods,
+      let queueSig: string;
+      try {
+        queueSig = await (program.methods as any)[methodName](
           computationOffset,
           Array.from(ciphertext[0]),
           Array.from(ciphertext[1]),
           Array.from(publicKey),
           new BN(deserializeLE(nonce).toString())
         )
-        .accountsPartial({
-          computationAccount: getComputationAccAddress(
-            CLUSTER_OFFSET,
-            computationOffset
-          ),
-          clusterAccount,
-          mxeAccount: getMXEAccAddress(PROGRAM_ID),
-          mempoolAccount: getMempoolAccAddress(CLUSTER_OFFSET),
-          executingPool: getExecutingPoolAccAddress(CLUSTER_OFFSET),
-          compDefAccount: getCompDefAccAddress(
-            PROGRAM_ID,
-            Buffer.from(getCompDefAccOffset(circuitName)).readUInt32LE()
-          ),
-        })
-        .rpc({ skipPreflight: true, commitment: "confirmed" });
+          .accountsPartial({
+            computationAccount: getComputationAccAddress(
+              CLUSTER_OFFSET,
+              computationOffset
+            ),
+            clusterAccount,
+            mxeAccount: getMXEAccAddress(PROGRAM_ID),
+            mempoolAccount: getMempoolAccAddress(CLUSTER_OFFSET),
+            executingPool: getExecutingPoolAccAddress(CLUSTER_OFFSET),
+            compDefAccount: getCompDefAccAddress(
+              PROGRAM_ID,
+              Buffer.from(getCompDefAccOffset(circuitName)).readUInt32LE()
+            ),
+          })
+          .rpc({ commitment: "confirmed" });
+      } catch (err: any) {
+        // Anchor + web3.js version mismatch hides real errors.
+        // Try to extract actual transaction logs.
+        if (err.logs) {
+          console.error("Transaction logs:", err.logs);
+          throw new Error(
+            `Transaction failed: ${err.logs.filter((l: string) => l.includes("Error") || l.includes("failed")).join("; ") || err.message}`
+          );
+        }
+        if (err instanceof SendTransactionError) {
+          const logs = await err.getLogs(connection);
+          console.error("Transaction logs:", logs);
+          throw new Error(`Transaction failed: ${logs?.join("; ") || err.message}`);
+        }
+        throw err;
+      }
 
       console.log("Queue tx:", queueSig);
 
