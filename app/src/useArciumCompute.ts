@@ -16,8 +16,8 @@ import {
   getClusterAccAddress,
   x25519,
 } from "@arcium-hq/client";
-import { HelloWorld } from "../../target/types/hello_world";
-import idl from "../../target/idl/hello_world.json";
+import { HelloWorld } from "./types/hello_world";
+import idl from "./idl/hello_world.json";
 
 export type Operation = "add" | "subtract" | "multiply";
 
